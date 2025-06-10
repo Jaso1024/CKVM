@@ -1,0 +1,12 @@
+[req]
+distinguished_name = req_distinguished_name
+
+[req_distinguished_name]
+commonName = Common Name (e.g. server FQDN or YOUR name)
+commonName_default = CKVM_CA
+
+[ v3_ca ]
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid:always,issuer
+basicConstraints = critical,CA:true
+keyUsage = critical, digitalSignature, cRLSign, keyCertSign

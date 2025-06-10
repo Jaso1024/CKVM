@@ -1,0 +1,10 @@
+pynput
+pytest
+mss
+numpy
+opencv-python
+pytest-mock
+cryptography
+pyOpenSSL
+streamlit
+pyserial

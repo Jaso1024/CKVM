@@ -1,0 +1,6 @@
+[req]
+distinguished_name = req_distinguished_name
+
+[req_distinguished_name]
+commonName = Common Name (e.g. server FQDN or YOUR name)
+commonName_default = CKVM_Client
