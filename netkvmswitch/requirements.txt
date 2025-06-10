@@ -1,10 +1,10 @@
-pynput
-pytest
+av
+certifi
+cffi
+cryptography
 mss
 numpy
-opencv-python
-pytest-mock
-cryptography
-pyOpenSSL
-streamlit
+opencv-contrib-python
+pynput
 pyserial
+streamlit

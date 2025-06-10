@@ -3,6 +3,15 @@ import os
 import time
 import logging
 
+# Configure logging to a file and console
+log_file_path = os.path.join(os.path.dirname(__file__), 'agent.log')
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    handlers=[
+                        logging.FileHandler(log_file_path),
+                        logging.StreamHandler() # Also keep console output
+                    ])
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from source_agent.client import SourceAgentClient

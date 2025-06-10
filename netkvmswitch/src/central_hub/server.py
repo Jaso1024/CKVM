@@ -17,10 +17,10 @@ import base64
 # Add the 'src' directory to the Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from common.protocol import create_message, parse_message, MessageType
+from common.protocol import MessageType, create_message, parse_message
 from common.serial_protocol import send_framed, receive_framed
 from common.config import config
-from central_hub.state_manager import StateManager
+from .state_manager import StateManager
 
 class CentralHubServer:
     def __init__(self, host=None, port=None, video_port=None):
@@ -35,6 +35,8 @@ class CentralHubServer:
         self.running = False
 
         self.state_manager = StateManager()
+        self.ui_video_clients = []
+        self.ui_video_clients_lock = threading.Lock()
 
         self.keyboard_listener = None
         self.mouse_listener = None
@@ -51,8 +53,14 @@ class CentralHubServer:
                 os.path.join(certs_dir, config.security.server_key)
             )
             context.load_verify_locations(os.path.join(certs_dir, config.security.ca_cert))
-            context.verify_mode = ssl.CERT_REQUIRED
-            context.check_hostname = False
+            
+            # For localhost testing, be more lenient with certificate verification
+            if self.host in ['127.0.0.1', 'localhost']:
+                context.verify_mode = ssl.CERT_NONE  # Don't require client certs for localhost
+                context.check_hostname = False
+            else:
+                context.verify_mode = ssl.CERT_REQUIRED
+                context.check_hostname = False
 
         # Main client connection socket (TLS)
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -62,9 +70,15 @@ class CentralHubServer:
         if config.security.use_tls:
             self.server_socket = context.wrap_socket(self.server_socket, server_side=True)
 
-        # Video streaming socket (UDP)
-        self.video_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Video streaming socket (TCP for reliability)
+        self.video_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.video_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.video_socket.bind((self.host, self.video_port))
+        
+        # UI video forwarding socket (NOW TCP)
+        self.ui_video_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.ui_video_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.ui_video_socket.bind((self.host, self.ui_video_port))
 
         # UI control socket (TCP, no TLS for local communication)
         self.ui_control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -75,12 +89,14 @@ class CentralHubServer:
         self.running = True
         print(f"Server listening on:")
         print(f"  Client connections: {self.host}:{self.port} (TCP{'S' if config.security.use_tls else ''})")
-        print(f"  Video streams: {self.host}:{self.video_port} (UDP)")
+        print(f"  Video streams: {self.host}:{self.video_port} (TCP)")
         print(f"  UI control: {self.host}:{self.ui_control_port} (TCP)")
+        print(f"  UI video: {self.host}:{self.ui_video_port} (TCP)")
 
         threading.Thread(target=self._accept_connections, daemon=True).start()
         threading.Thread(target=self._accept_ui_connections, daemon=True).start()
-        threading.Thread(target=self._receive_video_streams, daemon=True).start()
+        threading.Thread(target=self._accept_video_connections, daemon=True).start()
+        threading.Thread(target=self._accept_ui_video_connections, daemon=True).start()
         threading.Thread(target=self._listen_for_usb_agents, daemon=True).start()
         self._start_input_listeners()
 
@@ -219,110 +235,96 @@ class CentralHubServer:
                 self._remove_client(addr)
                 break
 
-    def _receive_video_streams(self):
-        # Structured frame assembly: {client_addr: {frame_id: {chunks: {chunk_num: data}, total_chunks: int}}}
-        frame_assembly = {}
+    def _accept_video_connections(self):
+        """Accept TCP video connections from clients."""
+        self.video_socket.listen(10)
+        print(f"Video server listening on {self.host}:{self.video_port} (TCP)")
         
         while self.running:
             try:
-                data, addr = self.video_socket.recvfrom(65536) # Max UDP packet size
-                
-                # Parse chunk metadata: frame_id(4) + chunk_num(2) + total_chunks(2) + data
-                if len(data) < 8:
-                    print(f"❌ Received malformed chunk from {addr}: too short ({len(data)} bytes)")
-                    continue
-                    
-                frame_id = int.from_bytes(data[0:4], 'big')
-                chunk_num = int.from_bytes(data[4:6], 'big') 
-                total_chunks = int.from_bytes(data[6:8], 'big')
-                chunk_data = data[8:]
-                
-                print(f"Received chunk {chunk_num}/{total_chunks} for frame {frame_id} from {addr} ({len(chunk_data)} bytes)")
-                
-                # Find which client this video data belongs to
-                client_addr = None
-                for k, v in self.state_manager.get_all_clients().items():
-                    if k[0] == addr[0]: 
-                        client_addr = k
-                        break
-                
-                if not client_addr:
-                    print(f"❌ No matching client found for video data from {addr}")
-                    continue
-                
-                # Initialize frame assembly structures
-                if client_addr not in frame_assembly:
-                    frame_assembly[client_addr] = {}
-                if frame_id not in frame_assembly[client_addr]:
-                    frame_assembly[client_addr][frame_id] = {"chunks": {}, "total_chunks": total_chunks}
-                
-                # Store chunk data
-                frame_assembly[client_addr][frame_id]["chunks"][chunk_num] = chunk_data
-                
-                # Check if frame is complete
-                frame_info = frame_assembly[client_addr][frame_id]
-                if len(frame_info["chunks"]) == frame_info["total_chunks"]:
-                    # All chunks received, assemble frame
-                    complete_frame_data = bytearray()
-                    for i in range(1, frame_info["total_chunks"] + 1):
-                        if i in frame_info["chunks"]:
-                            complete_frame_data.extend(frame_info["chunks"][i])
-                        else:
-                            print(f"❌ Missing chunk {i} for frame {frame_id}")
-                            break
-                    else:
-                        # All chunks found, decode frame
-                        try:
-                            np_arr = np.frombuffer(complete_frame_data, np.uint8)
-                            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-                            if frame is not None:
-                                print(f"✅ Successfully decoded frame {frame_id} from {client_addr}. Shape: {frame.shape}")
-                                self.state_manager.update_latest_frame(client_addr, frame)
-                                
-                                # Forward to UI if this is the active client
-                                if self.state_manager.get_active_client() == client_addr:
-                                    try:
-                                        self._forward_frame_to_ui(complete_frame_data, frame_id)
-                                    except Exception as e:
-                                        print(f"Error forwarding frame to UI: {e}")
-                            else:
-                                print(f"❌ Failed to decode frame {frame_id} from {client_addr}")
-                        except Exception as e:
-                            print(f"❌ Exception decoding frame {frame_id}: {e}")
-                    
-                    # Clean up completed frame
-                    del frame_assembly[client_addr][frame_id]
-                
-                # Cleanup old incomplete frames (prevent memory leak)
-                current_time = int(time.time() * 1000) % 100000
-                for fid in list(frame_assembly[client_addr].keys()):
-                    if abs(current_time - fid) > 5000:  # Remove frames older than 5 seconds
-                        del frame_assembly[client_addr][fid]
-
-            except socket.timeout:
-                continue
+                conn, addr = self.video_socket.accept()
+                print(f"Video connection from {addr}")
+                threading.Thread(target=self._handle_video_connection, args=(conn, addr), daemon=True).start()
             except Exception as e:
                 if self.running:
-                    print(f"Error receiving video stream: {e}")
+                    print(f"Error accepting video connection: {e}")
                 break
 
-    def _forward_frame_to_ui(self, frame_data, frame_id):
-        """Forward frame to UI using chunking protocol to handle large frames."""
-        chunk_size = 64000  # Leave room for metadata header
-        total_chunks = (len(frame_data) + chunk_size - 1) // chunk_size
-        
-        print(f"Forwarding frame {frame_id} to UI: {len(frame_data)} bytes in {total_chunks} chunks")
-        
-        for i in range(0, len(frame_data), chunk_size):
-            chunk_data = frame_data[i:i+chunk_size]
-            chunk_num = i // chunk_size + 1
+    def _handle_video_connection(self, conn, addr):
+        """Handle TCP video stream from a client and forward it."""
+        client_control_addr = None
+        try:
+            # First, we need to associate this video connection with a control connection
+            # The client should send a HELLO message on the control connection that includes its video port
+            # For now, we'll find the client by matching the IP and hoping the port is right.
+            # A better approach would be a proper handshake.
             
-            # Create chunk with metadata: frame_id(4) + chunk_num(2) + total_chunks(2) + data
-            chunk_header = frame_id.to_bytes(4, 'big') + chunk_num.to_bytes(2, 'big') + total_chunks.to_bytes(2, 'big')
-            chunk_with_header = chunk_header + chunk_data
+            # Simplified: Find client by IP. This assumes one client per IP.
+            for c_addr, info in self.state_manager.get_all_clients().items():
+                if c_addr[0] == addr[0]:
+                    client_control_addr = c_addr
+                    info['video_conn'] = conn
+                    print(f"Associated video connection {addr} with control connection {c_addr}")
+                    break
+
+            if not client_control_addr:
+                print(f"Could not find a matching control client for video connection {addr}. Closing.")
+                return
+
+            while self.running:
+                # Read H.264 packets and forward them
+                # PyAV's h264 container format sends raw packets. We can read in chunks.
+                packet = conn.recv(4096)
+                if not packet:
+                    print(f"Video stream from {addr} ended.")
+                    break
+                
+                # Forward this packet to all connected UI clients
+                # Add logging here to confirm packet reception and forwarding
+                print(f"Received {len(packet)} bytes video packet from {addr}. Forwarding to UI clients.")
+                self._forward_packet_to_ui(packet)
+
+        except (ConnectionResetError, BrokenPipeError):
+            print(f"Video connection from {addr} lost.")
+        except Exception as e:
+            print(f"Error handling video from {addr}: {e}")
+        finally:
+            if client_control_addr:
+                self.state_manager.get_client_info(client_control_addr).pop('video_conn', None)
+            conn.close()
+            print(f"Closed video connection from {addr}")
+
+    def _forward_packet_to_ui(self, packet):
+        """Forward a raw video packet to all connected UI clients."""
+        with self.ui_video_clients_lock:
+            disconnected_clients = []
+            for ui_conn in self.ui_video_clients:
+                try:
+                    ui_conn.sendall(packet)
+                except (ConnectionResetError, BrokenPipeError):
+                    print("UI video client disconnected.")
+                    disconnected_clients.append(ui_conn)
+                except Exception as e:
+                    print(f"Error sending packet to UI client: {e}")
+                    disconnected_clients.append(ui_conn)
             
-            self.video_socket.sendto(chunk_with_header, ('localhost', self.ui_video_port))
-            # print(f"Sent chunk {chunk_num}/{total_chunks} to UI: {len(chunk_data)} bytes")
+            # Clean up disconnected clients
+            for client in disconnected_clients:
+                self.ui_video_clients.remove(client)
+
+    def _accept_ui_video_connections(self):
+        """Accept TCP connections from the UI for video streaming."""
+        self.ui_video_socket.listen(5)
+        while self.running:
+            try:
+                conn, addr = self.ui_video_socket.accept()
+                print(f"UI video client connected from {addr}")
+                with self.ui_video_clients_lock:
+                    self.ui_video_clients.append(conn)
+            except Exception as e:
+                if self.running:
+                    print(f"Error accepting UI video connection: {e}")
+                break
 
     def get_latest_frame(self, client_addr):
         return self.state_manager.get_latest_frame(client_addr)
@@ -506,6 +508,8 @@ class CentralHubServer:
             self.server_socket.close()
         if self.video_socket:
             self.video_socket.close()
+        if self.ui_video_socket:
+            self.ui_video_socket.close()
         if self.ui_control_socket:
             self.ui_control_socket.close()
         print("Server stopped.")

@@ -7,6 +7,8 @@ import numpy as np
 import socket
 import threading
 from multiprocessing import Process, Queue
+import av # New import for real-time decoding
+import logging
 
 # Add the src directory to the path so we can import our modules
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -15,6 +17,18 @@ from common.protocol import create_message, parse_message
 from common.config import config
 from central_hub.hub_runner import run_hub_process
 from source_agent.agent_runner import run_agent_process
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - UI - %(message)s')
+
+def recv_all(sock, n):
+    """Helper function to receive n bytes from a socket."""
+    data = bytearray()
+    while len(data) < n:
+        packet = sock.recv(n - len(data))
+        if not packet:
+            return None
+        data.extend(packet)
+    return data
 
 # --- Process Management ---
 def manage_process(process_key, target, args=()):
@@ -85,8 +99,11 @@ class NetKVMUI:
         try:
             self.control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.control_socket.connect((config.ui.server_host, config.server.ui_control_port))
-            self.video_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.video_socket.bind(('', config.ui.ui_video_port))
+            
+            # Connect to the new TCP video stream
+            self.video_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.video_socket.connect((config.ui.server_host, config.server.ui_video_port))
+
             self.connected = True
             threading.Thread(target=self._receive_video_stream, daemon=True).start()
             return True
@@ -124,59 +141,51 @@ class NetKVMUI:
         return self.active_client
         
     def _receive_video_stream(self):
-        frame_assembly = {}  # {frame_id: {chunks: {chunk_num: data}, total_chunks: int}}
+        """Receives length-prefixed H.264 frames and decodes them."""
+        codec = av.CodecContext.create('h264', 'r')
         
         while self.connected:
             try:
-                data, _ = self.video_socket.recvfrom(65536)
+                # 1. Read the 4-byte frame size header
+                frame_size_bytes = recv_all(self.video_socket, 4)
+                if not frame_size_bytes:
+                    logging.warning("Connection closed by server.")
+                    break
                 
-                # Parse chunk metadata: frame_id(4) + chunk_num(2) + total_chunks(2) + data
-                if len(data) < 8:
+                frame_size = int.from_bytes(frame_size_bytes, 'big')
+
+                # 2. Read the full frame data
+                frame_data = recv_all(self.video_socket, frame_size)
+                if not frame_data:
+                    logging.error(f"Incomplete frame received. Expected {frame_size} bytes, but connection closed.")
+                    break
+                
+                logging.info(f"Received complete frame of {frame_size} bytes.")
+
+                # 3. Decode the frame
+                packets = codec.parse(frame_data)
+                if not packets:
+                    logging.warning("Could not parse any packets from the received frame data.")
                     continue
-                    
-                frame_id = int.from_bytes(data[0:4], 'big')
-                chunk_num = int.from_bytes(data[4:6], 'big') 
-                total_chunks = int.from_bytes(data[6:8], 'big')
-                chunk_data = data[8:]
-                
-                # Initialize frame assembly structures
-                if frame_id not in frame_assembly:
-                    frame_assembly[frame_id] = {"chunks": {}, "total_chunks": total_chunks}
-                
-                # Store chunk data
-                frame_assembly[frame_id]["chunks"][chunk_num] = chunk_data
-                
-                # Check if frame is complete
-                frame_info = frame_assembly[frame_id]
-                if len(frame_info["chunks"]) == frame_info["total_chunks"]:
-                    # All chunks received, assemble frame
-                    complete_frame_data = bytearray()
-                    for i in range(1, frame_info["total_chunks"] + 1):
-                        if i in frame_info["chunks"]:
-                            complete_frame_data.extend(frame_info["chunks"][i])
-                        else:
-                            break
-                    else:
-                        # All chunks found, decode frame
-                        try:
-                            with self.frame_lock:
-                                self.latest_frame = cv2.imdecode(np.frombuffer(complete_frame_data, np.uint8), cv2.IMREAD_COLOR)
-                        except Exception as e:
-                            print(f"Error decoding frame {frame_id}: {e}")
-                    
-                    # Clean up completed frame
-                    del frame_assembly[frame_id]
-                
-                # Cleanup old incomplete frames (prevent memory leak)
-                current_time = int(time.time() * 1000) % 100000
-                for fid in list(frame_assembly.keys()):
-                    if abs(current_time - fid) > 5000:  # Remove frames older than 5 seconds
-                        del frame_assembly[fid]
-                        
-            except Exception as e:
-                print(f"Error in video stream reception: {e}")
+
+                for packet in packets:
+                    frames = codec.decode(packet)
+                    for frame in frames:
+                        img = frame.to_ndarray(format='bgr24')
+                        with self.frame_lock:
+                            self.latest_frame = img
+            
+            except (ConnectionResetError, BrokenPipeError):
+                logging.warning("Video connection to server was lost.")
                 break
-    
+            except Exception as e:
+                logging.error(f"Video reception/decoding error: {e}", exc_info=True)
+                # Reset codec on error to handle potential corruption
+                codec = av.CodecContext.create('h264', 'r')
+                continue
+
+        logging.info("Video receiver thread stopped.")
+
     def get_latest_frame(self):
         with self.frame_lock:
             return self.latest_frame
@@ -235,8 +244,10 @@ def draw_receiver_mode():
             
             frame = ui.get_latest_frame()
             if frame is not None:
+                print(f"🖼️ UI: Displaying frame with shape {frame.shape}")
                 st.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), use_container_width=True)
             else:
+                print("⏳ UI: No frame available, showing placeholder")
                 st.image(np.zeros((480, 640, 3), dtype=np.uint8), caption="Waiting for video...", use_container_width=True)
             
             time.sleep(0.05)
