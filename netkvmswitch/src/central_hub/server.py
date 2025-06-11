@@ -66,15 +66,13 @@ class CentralHubServer:
             )
             context.load_verify_locations(os.path.join(certs_dir, config.security.ca_cert))
             
-            # For localhost testing, be more lenient with certificate verification
             if self.host in ['127.0.0.1', 'localhost']:
-                context.verify_mode = ssl.CERT_NONE  # Don't require client certs for localhost
+                context.verify_mode = ssl.CERT_NONE
                 context.check_hostname = False
             else:
                 context.verify_mode = ssl.CERT_REQUIRED
                 context.check_hostname = False
 
-        # Main client connection socket (TLS)
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server_socket.bind((self.host, self.port))
@@ -82,17 +80,14 @@ class CentralHubServer:
         if config.security.use_tls:
             self.server_socket = context.wrap_socket(self.server_socket, server_side=True)
 
-        # Video streaming socket (TCP for reliability)
         self.video_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.video_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.video_socket.bind((self.host, self.video_port))
         
-        # UI video forwarding socket (NOW TCP)
         self.ui_video_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.ui_video_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.ui_video_socket.bind((self.host, self.ui_video_port))
 
-        # UI control socket (TCP, no TLS for local communication)
         self.ui_control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.ui_control_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.ui_control_socket.bind((self.host, self.ui_control_port))
@@ -116,9 +111,7 @@ class CentralHubServer:
         while self.running:
             try:
                 conn, addr = self.server_socket.accept()
-                # The accepted 'conn' is already an SSLSocket due to wrap_socket on the listening socket
                 print(f"Accepted connection from {addr}")
-                # Client will be added to state_manager upon receiving CLIENT_HELLO
                 threading.Thread(target=self._handle_client, args=(conn, addr), daemon=True).start()
                 self._send_server_ack(conn)
             except socket.timeout:
@@ -129,7 +122,6 @@ class CentralHubServer:
                 break
 
     def _accept_ui_connections(self):
-        """Accept connections from the UI for control commands."""
         while self.running:
             try:
                 conn, addr = self.ui_control_socket.accept()
@@ -143,7 +135,6 @@ class CentralHubServer:
                 break
 
     def _handle_ui_client(self, conn, addr):
-        """Handle commands from the UI."""
         while self.running:
             try:
                 data = conn.recv(4096)
@@ -171,7 +162,6 @@ class CentralHubServer:
             pass
 
     def _process_ui_command(self, message):
-        """Process commands from the UI and return response."""
         cmd_type = message.get("type")
         payload = message.get("payload", {})
         
@@ -188,9 +178,7 @@ class CentralHubServer:
         elif cmd_type == "set_active_client":
             addr_str = payload.get("address")
             if addr_str:
-                # Parse address string back to tuple
                 try:
-                    # Handle format like "('127.0.0.1', 12345)"
                     addr_str = addr_str.strip("()'\" ")
                     ip, port = addr_str.split(", ")
                     addr = (ip.strip("'\" "), int(port))
@@ -211,7 +199,6 @@ class CentralHubServer:
             if active:
                 frame = self.state_manager.get_latest_frame(active)
                 if frame is not None:
-                    # Encode frame as JPEG for transmission
                     _, img_encoded = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                     frame_data = base64.b64encode(img_encoded.tobytes()).decode('utf-8')
                     return {"frame": frame_data, "has_frame": True}
@@ -238,7 +225,40 @@ class CentralHubServer:
                     return {"success": False, "message": "Active client is a USB device or not found."}
             else:
                 return {"success": False, "message": "No active client to shut down."}
+
+        elif cmd_type == "restart_agent":
+            addr_str = payload.get("address")
+            if addr_str:
+                try:
+                    addr_str = addr_str.strip("()'\" ")
+                    ip, port = addr_str.split(", ")
+                    addr = (ip.strip("'\" "), int(port))
+                    
+                    client_info = self.state_manager.get_client_info(addr)
+                    if client_info:
+                        restart_msg = create_message(MessageType.RESTART, {})
+                        client_info["conn"].sendall(restart_msg)
+                        return {"success": True, "message": f"Restart signal sent to {addr}"}
+                    else:
+                        return {"success": False, "message": "Client not found"}
+                except Exception as e:
+                    return {"success": False, "message": f"Invalid address or failed to send: {e}"}
         
+        elif cmd_type == "forward_io_event":
+            target_address_str = payload.get("address")
+            event_type = payload.get("event_type")
+            event_payload = payload.get("payload")
+            
+            try:
+                addr_str = target_address_str.strip("()'\" ")
+                ip, port = addr_str.split(", ")
+                target_address = (ip.strip("'\" "), int(port))
+                
+                self._send_input_event_to_client(target_address, event_type, event_payload)
+                return {"success": True}
+            except Exception as e:
+                return {"success": False, "message": str(e)}
+
         return {"error": f"Unknown command: {cmd_type}"}
 
     def _handle_client(self, conn, addr):
@@ -255,7 +275,6 @@ class CentralHubServer:
                     client_video_port = message['payload'].get('video_port')
                     print(f"Client {addr} ({client_name}) sent hello. Video port: {client_video_port}")
                     self.state_manager.add_client(addr, {"conn": conn, "name": client_name, "video_port": client_video_port})
-                    # Optionally set this client as active if it's the first one
                     if not self.state_manager.get_active_client():
                         self.state_manager.set_active_client(addr)
 
@@ -270,7 +289,6 @@ class CentralHubServer:
                 break
 
     def _accept_video_connections(self):
-        """Accept TCP video connections from clients."""
         self.video_socket.listen(10)
         print(f"Video server listening on {self.host}:{self.video_port} (TCP)")
         
@@ -285,8 +303,6 @@ class CentralHubServer:
                 break
 
     def _handle_video_connection(self, conn, addr):
-        # Find the control client that this video connection belongs to
-        # The IP address of the video connection should match the control connection
         client_addr = self.state_manager.find_client_by_ip(addr[0])
 
         if not client_addr:
@@ -297,11 +313,8 @@ class CentralHubServer:
         print(f"Associated video connection from {addr} with control client {client_addr}")
         self.state_manager.add_video_socket(client_addr, conn)
 
-        # Now, continuously receive video data from this socket
         try:
             while self.running:
-                # --- FRAMING PROTOCOL ---
-                # 1. Read the 4-byte frame size header
                 size_bytes = recv_all(conn, 4)
                 if not size_bytes:
                     print(f"Video client {addr} disconnected (no header).")
@@ -309,24 +322,18 @@ class CentralHubServer:
                 
                 frame_size = int.from_bytes(size_bytes, 'big')
 
-                # Basic validation
-                if frame_size <= 0 or frame_size > 20 * 1024 * 1024: # 20MB limit
+                if frame_size <= 0 or frame_size > 20 * 1024 * 1024:
                     print(f"Invalid frame size received from {addr}: {frame_size}")
                     break
 
-                # 2. Read the full frame data based on the header size
                 frame_data = recv_all(conn, frame_size)
                 if not frame_data:
                     print(f"Video client {addr} disconnected (incomplete frame).")
                     break
                 
-                # Create a packet (we don't need to decode it here, just forward)
                 packet = av.Packet(frame_data)
                 
-                # Check if this is the active client
-                active_client_addr = self.state_manager.get_active_client()
-                if client_addr == active_client_addr:
-                    self._forward_packet_to_ui(packet)
+                self._forward_packet_to_ui(client_addr, packet)
 
         except ConnectionResetError:
             print(f"Video connection from {addr} was forcibly closed.")
@@ -337,31 +344,32 @@ class CentralHubServer:
             self.state_manager.remove_video_socket(client_addr)
             conn.close()
 
-    def _forward_packet_to_ui(self, packet):
-        """Forward a raw video packet to all connected UI clients."""
+    def _forward_packet_to_ui(self, client_addr, packet):
         with self.ui_video_clients_lock:
             disconnected_clients = []
-            # The packet from the native client is already framed (size + data).
-            # The hub's job is to forward this ENTIRE payload to the UI.
-            # `packet` is an av.Packet object. its content is in bytes(packet).
-            data_to_send = bytes(packet)
-            size_header = len(data_to_send).to_bytes(4, 'big')
-            full_message = size_header + data_to_send
+            
+            addr_str = str(client_addr)
+            addr_bytes = addr_str.encode('utf-8')
+            padded_addr = addr_bytes.ljust(40)
+
+            h264_data = bytes(packet)
+
+            message_to_send = padded_addr + h264_data
+            
+            size_header = len(message_to_send).to_bytes(4, 'big')
+            full_message = size_header + message_to_send
 
             for ui_conn in self.ui_video_clients:
                 try:
-                    # Send the complete framed message (header + data)
                     ui_conn.sendall(full_message)
                 except (ConnectionResetError, BrokenPipeError):
                     print("UI video client disconnected.")
                     disconnected_clients.append(ui_conn)
             
-            # Clean up disconnected clients
             for client in disconnected_clients:
                 self.ui_video_clients.remove(client)
 
     def _accept_ui_video_connections(self):
-        """Accept TCP connections from the UI for video streaming."""
         self.ui_video_socket.listen(5)
         while self.running:
             try:
@@ -399,7 +407,6 @@ class CentralHubServer:
     def set_active_client(self, addr):
         if self.state_manager.set_active_client(addr):
             print(f"Active client set to {addr}")
-            # Notify all clients about the active client change (optional for Phase 1)
             for client_addr, client_info in self.state_manager.get_all_clients().items():
                 try:
                     switch_msg = create_message(MessageType.SWITCH_CLIENT, {"active_client": str(addr)})
@@ -439,31 +446,34 @@ class CentralHubServer:
         self._send_input_event(MessageType.MOUSE_EVENT, {"event_type": "scroll", "x": x, "y": y, "dx": dx, "dy": dy})
 
     def _on_mouse_move(self, x, y):
-        # This can generate a lot of events, consider throttling or only sending relative movements
         self._send_input_event(MessageType.MOUSE_EVENT, {"event_type": "move", "x": x, "y": y})
 
     def _send_input_event(self, event_type, payload):
         if not self.input_forwarding_enabled:
-            return # Do not send input if forwarding is disabled
+            return
 
         active_client_address = self.state_manager.get_active_client()
-        if active_client_address and active_client_address in self.state_manager.get_all_clients():
+        if active_client_address:
+            self._send_input_event_to_client(active_client_address, event_type, payload)
+
+    def _send_input_event_to_client(self, client_address, event_type, payload):
+        if not self.input_forwarding_enabled:
+            return
+
+        if client_address in self.state_manager.get_all_clients():
             try:
                 message = create_message(event_type, payload)
-                client_info = self.state_manager.get_client_info(active_client_address)
+                client_info = self.state_manager.get_client_info(client_address)
                 
-                # Check if USB or Network client
                 if client_info.get("type") == "USB":
                     send_framed(client_info["conn"], {"type": event_type, "payload": payload})
-                else: # Network client
+                else:
                     client_info["conn"].sendall(message)
             except Exception as e:
-                print(f"Error sending {event_type} to active client {active_client_address}: {e}")
-                self._remove_client(active_client_address)
-        # else: No active client to send input to
+                print(f"Error sending {event_type} to client {client_address}: {e}")
+                self._remove_client(client_address)
 
     def _listen_for_usb_agents(self):
-        """Periodically scan for new serial devices and attempt to connect."""
         print("[USB] Starting USB agent listener...")
         known_ports = set()
         while self.running:
@@ -473,7 +483,6 @@ class CentralHubServer:
 
                 for port in new_ports:
                     print(f"[USB] New serial port detected: {port}")
-                    # Give the OS a moment to stabilize the new port
                     time.sleep(1)
                     thread = threading.Thread(target=self._handle_usb_client, args=(port,), daemon=True)
                     thread.start()
@@ -482,10 +491,9 @@ class CentralHubServer:
             except Exception as e:
                 print(f"[USB] Error scanning for serial ports: {e}")
             
-            time.sleep(5) # Scan every 5 seconds
+            time.sleep(5)
     
     def _handle_usb_client(self, port):
-        """Handle a single USB client connection, from handshake to termination."""
         print(f"[USB] Attempting to handshake with agent on {port}...")
         try:
             conn = serial.Serial(port, baudrate=115200, timeout=2)
@@ -496,7 +504,6 @@ class CentralHubServer:
         client_id = f"USB:{port}"
 
         try:
-            # Handshake
             handshake_payload = {"magic": "NETKVM_SERVER_HELLO"}
             if not send_framed(conn, {"type": "handshake", "payload": handshake_payload}):
                 conn.close()
@@ -512,15 +519,12 @@ class CentralHubServer:
             print(f"[USB] Handshake successful with {client_name} on {port}")
             self.state_manager.add_client(client_id, {"conn": conn, "name": client_name, "type": "USB"})
 
-            # Main communication loop
             while self.running and client_id in self.state_manager.get_all_clients():
                 message = receive_framed(conn)
                 if message is None:
-                    # null message means disconnection or error
                     print(f"[USB] Agent {client_id} disconnected.")
                     break
                 
-                # Here, we only expect video frames from the client
                 if message.get("type") == MessageType.VIDEO_FRAME:
                     frame_data = base64.b64decode(message["payload"]["frame"])
                     np_arr = np.frombuffer(frame_data, np.uint8)
@@ -547,7 +551,6 @@ class CentralHubServer:
             self.mouse_listener.stop()
             self.mouse_listener.join()
 
-        # Close all client connections
         for addr, client_info in list(self.state_manager.get_all_clients().items()):
             if "conn" in client_info:
                 try:
@@ -574,7 +577,7 @@ def main():
         server.start()
         print("[SUCCESS] Server has started successfully.")
         while True:
-            time.sleep(1) # Keep main thread alive
+            time.sleep(1)
     except KeyboardInterrupt:
         print("\n[INFO] Shutting down server...")
     except Exception as e:

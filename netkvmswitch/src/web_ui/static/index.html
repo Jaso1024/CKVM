@@ -21,16 +21,33 @@
                     <input type="checkbox" id="input-forwarding" checked>
                     Enable Input Forwarding
                 </label>
+                <div class="refresh-control">
+                    <label for="refresh-interval">Refresh Interval:</label>
+                    <select id="refresh-interval">
+                        <option value="0">Never</option>
+                        <option value="60000">1 Minute</option>
+                        <option value="300000" selected>5 Minutes</option>
+                        <option value="600000">10 Minutes</option>
+                    </select>
+                </div>
+                <button id="shutdown-hub-btn" class="danger-btn">Shutdown Hub</button>
             </div>
         </div>
         <div class="main-content">
-            <div class="video-container">
-                <div id="fps-display">FPS: 0</div>
-                <video id="player" autoplay muted playsinline></video>
+            <div id="video-grid" class="video-grid">
+                <!-- Video elements will be dynamically inserted here -->
             </div>
         </div>
     </div>
     <script src="/static/jmuxer.min.js"></script>
     <script src="/static/app.js"></script>
+
+    <div id="refresh-modal" class="modal" style="display:none;">
+        <div class="modal-content">
+            <p>The connection has been running for a while. Would you like to refresh it to ensure optimal performance?</p>
+            <button id="refresh-yes">Yes, Refresh</button>
+            <button id="refresh-no">No, Snooze</button>
+        </div>
+    </div>
 </body>
 </html>

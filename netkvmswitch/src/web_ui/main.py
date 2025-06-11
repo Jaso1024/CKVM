@@ -128,6 +128,27 @@ async def stop_agent():
         return {"success": True, "message": "Agent stopped."}
     return {"success": False, "message": "Agent not running."}
 
+@app.post("/api/agent/restart")
+async def restart_agent(payload: dict):
+    address = payload.get("address")
+    if not address:
+        return {"success": False, "message": "Address not provided."}
+    response = hub_connector.send_command("restart_agent", {"address": address})
+    return response or {"success": False, "message": "Failed to send restart command."}
+
+@app.post("/api/io/event")
+async def forward_io_event(payload: dict):
+    response = hub_connector.send_command("forward_io_event", payload)
+    return response or {"success": False, "message": "Failed to forward I/O event"}
+
+@app.post("/api/hub/shutdown")
+async def shutdown_hub():
+    logging.warning("Shutdown command received from UI. Shutting down.")
+    # This is a bit of a hack, but it's a reliable way to stop the uvicorn server
+    # which will then allow the run_ui.py script to terminate the hub process.
+    os.kill(os.getpid(), signal.SIGINT)
+    return {"success": True, "message": "Shutdown signal sent."}
+
 # --- WebSocket Endpoint ---
 @app.websocket("/ws/video")
 async def websocket_endpoint(websocket: WebSocket):
@@ -156,19 +177,21 @@ async def forward_video_stream():
 
     while True:
         try:
+            # The hub now sends a message framed with a 4-byte length header.
+            # This message contains the padded address and the H.264 data.
             size_bytes = await asyncio.to_thread(recv_all, hub_connector.video_socket, 4)
             if not size_bytes:
                 logging.warning("Hub video stream disconnected. Reconnecting...")
                 hub_connector.connect()
                 continue
 
-            frame_size = int.from_bytes(size_bytes, 'big')
-            frame_data = await asyncio.to_thread(recv_all, hub_connector.video_socket, frame_size)
-            if not frame_data:
+            message_size = int.from_bytes(size_bytes, 'big')
+            message_data = await asyncio.to_thread(recv_all, hub_connector.video_socket, message_size)
+            if not message_data:
                 continue
 
-            # Directly forward the raw H.264 packet
-            await manager.broadcast(frame_data)
+            # Directly forward the entire message (tagged packet) to the UI
+            await manager.broadcast(message_data)
 
         except Exception as e:
             logging.error(f"Video forwarding error: {e}")

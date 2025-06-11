@@ -41,20 +41,19 @@ def video_pipeline_process(running_flag, encoded_packet_queue, shm_name, frame_s
     # --- Inner functions for capture and encode ---
     def capture_frames():
         capturer = ScreenCapturer()
-        target_width, target_height = frame_shape[1], frame_shape[0]
         frame_interval = 1.0 / 60.0
 
         while running_flag.value:
             try:
-                raw_frame = capturer.capture_frame()
-                if raw_frame is None: continue
-
-                if (raw_frame.shape[1], raw_frame.shape[0]) != (target_width, target_height):
-                    frame = cv2.resize(raw_frame, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
-                else:
-                    frame = raw_frame
+                frame = capturer.capture_frame()
+                if frame is None: continue
                 
-                # Write directly to shared memory
+                # Write directly to shared memory, resizing if necessary
+                if frame.shape != frame_shape:
+                    # This should only happen if the screen resolution changes
+                    # We need to resize to fit the shared memory buffer
+                    frame = cv2.resize(frame, (frame_shape[1], frame_shape[0]), interpolation=cv2.INTER_LINEAR)
+
                 np.copyto(frame_buffer, frame)
 
                 time.sleep(frame_interval)
@@ -63,15 +62,15 @@ def video_pipeline_process(running_flag, encoded_packet_queue, shm_name, frame_s
                 time.sleep(0.1)
 
     def encode_frames():
+        encoder_name = 'libx264'
+        logging.warning(f"Using encoder: {encoder_name}")
+
         try:
             container = av.open('dummy', mode='w', format='h264')
-            stream = container.add_stream('h264', rate=60)
+            stream = container.add_stream(encoder_name, rate=60)
             stream.width, stream.height = frame_shape[1], frame_shape[0]
             stream.pix_fmt = 'yuv420p'
-            stream.options = {
-                'crf': '23', 'preset': 'veryfast', 'tune': 'zerolatency',
-                'hwaccel': 'auto', 'flags': 'low_delay'
-            }
+            stream.options = {'crf': '23', 'preset': 'veryfast', 'tune': 'zerolatency'}
 
             while running_flag.value:
                 try:
@@ -179,14 +178,21 @@ class SourceAgentClient:
             return False
 
     def _start_streaming(self):
-        frame_shape = (720, 1280, 3)
+        # Get native screen resolution for the primary monitor
+        with mss() as sct:
+            monitor = sct.monitors[1]
+            width, height = monitor['width'], monitor['height']
+
+        # Ensure dimensions are divisible by 2 for the encoder
+        width = width if width % 2 == 0 else width - 1
+        height = height if height % 2 == 0 else height - 1
+        
+        frame_shape = (height, width, 3)
         frame_dtype = np.uint8
         frame_size = int(np.prod(frame_shape) * np.dtype(frame_dtype).itemsize)
         
-        # Generate a unique name for the shared memory block
         shm_name = f'netkvm_frame_buffer_{os.getpid()}_{time.time()}'
 
-        # Create the new shared memory block
         self.shared_memory = shared_memory.SharedMemory(name=shm_name, create=True, size=frame_size)
 
         encoded_packet_queue = Queue()
@@ -248,6 +254,11 @@ class SourceAgentClient:
         payload = message.get("payload")
         if msg_type == MessageType.KEY_EVENT: self._inject_key_event(payload)
         elif msg_type == MessageType.MOUSE_EVENT: self._inject_mouse_event(payload)
+        elif msg_type == MessageType.RESTART:
+            logging.warning("Restart command received from hub.")
+            self.stop()
+            time.sleep(1) # Give sockets time to close
+            self.start()
 
     def _inject_key_event(self, payload):
         event_type, key_str = payload["event_type"], payload["key"]

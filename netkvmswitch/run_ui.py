@@ -29,9 +29,16 @@ def main():
 
     # Start the FastAPI web UI using uvicorn
     print("[UI RUNNER] Starting FastAPI web UI...")
-    # Note: We need to specify the app as a string 'module:app_object'
-    # and set the working directory to 'src' so it can find the modules.
-    uvicorn.run("web_ui.main:app", host="0.0.0.0", port=8000, reload=True, app_dir=src_path)
+    try:
+        # Note: We need to specify the app as a string 'module:app_object'
+        # and set the working directory to 'src' so it can find the modules.
+        uvicorn.run("web_ui.main:app", host="0.0.0.0", port=8000, reload=True, app_dir=src_path)
+    finally:
+        print("[UI RUNNER] Uvicorn server has shut down. Terminating hub process.")
+        if hub_process.is_alive():
+            hub_process.terminate()
+            hub_process.join()
+        print("[UI RUNNER] Hub process terminated.")
 
 if __name__ == "__main__":
     # This is necessary for multiprocessing on Windows
