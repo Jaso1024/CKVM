@@ -3,6 +3,7 @@
 import mss
 import numpy as np
 import time
+import cv2
 
 class ScreenCapturer:
     def __init__(self):
@@ -34,8 +35,8 @@ class ScreenCapturer:
             sct_img = self.sct.grab(self.capture_area)
             # Convert to a numpy array
             img = np.array(sct_img)
-            # MSS captures in BGRA, convert to RGB by dropping alpha and reordering channels
-            img = img[:, :, [2, 1, 0]]  # Convert BGRA to RGB (swap B and R channels, keep G, drop A)
+            # MSS captures in BGRA, convert to RGB for the encoder
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
             return img
         except mss.exception.ScreenShotError as e:
             print(f"Screen capture error: {e}")

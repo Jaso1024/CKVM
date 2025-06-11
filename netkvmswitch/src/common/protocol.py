@@ -10,6 +10,7 @@ class MessageType:
     STREAM_STATUS = "stream_status"
     CLIPBOARD_EVENT = "clipboard_event"
     VIDEO_FRAME = "video_frame"
+    SHUTDOWN = "shutdown"
 
 def create_message(msg_type, payload):
     return json.dumps({"type": msg_type, "payload": payload}).encode('utf-8')

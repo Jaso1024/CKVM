@@ -13,6 +13,7 @@ import os
 import serial
 import serial.tools.list_ports
 import base64
+import av
 
 # Add the 'src' directory to the Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -21,6 +22,16 @@ from common.protocol import MessageType, create_message, parse_message
 from common.serial_protocol import send_framed, receive_framed
 from common.config import config
 from .state_manager import StateManager
+
+def recv_all(sock, n):
+    """Helper function to receive n bytes from a socket."""
+    data = bytearray()
+    while len(data) < n:
+        packet = sock.recv(n - len(data))
+        if not packet:
+            return None
+        data.extend(packet)
+    return data
 
 class CentralHubServer:
     def __init__(self, host=None, port=None, video_port=None):
@@ -33,6 +44,7 @@ class CentralHubServer:
         self.video_socket = None
         self.ui_control_socket = None
         self.running = False
+        self.input_forwarding_enabled = True
 
         self.state_manager = StateManager()
         self.ui_video_clients = []
@@ -205,6 +217,28 @@ class CentralHubServer:
                     return {"frame": frame_data, "has_frame": True}
             return {"frame": None, "has_frame": False}
         
+        elif cmd_type == "set_input_forwarding":
+            enabled = payload.get("enabled", False)
+            self.input_forwarding_enabled = bool(enabled)
+            print(f"Input forwarding {'enabled' if self.input_forwarding_enabled else 'disabled'}.")
+            return {"success": True, "enabled": self.input_forwarding_enabled}
+            
+        elif cmd_type == "shutdown_active_client":
+            active_client_addr = self.state_manager.get_active_client()
+            if active_client_addr:
+                client_info = self.state_manager.get_client_info(active_client_addr)
+                if client_info and client_info.get("type") != "USB":
+                    try:
+                        shutdown_msg = create_message(MessageType.SHUTDOWN, {})
+                        client_info["conn"].sendall(shutdown_msg)
+                        return {"success": True, "message": f"Shutdown signal sent to {active_client_addr}"}
+                    except Exception as e:
+                        return {"success": False, "message": f"Failed to send shutdown signal: {e}"}
+                else:
+                    return {"success": False, "message": "Active client is a USB device or not found."}
+            else:
+                return {"success": False, "message": "No active client to shut down."}
+        
         return {"error": f"Unknown command: {cmd_type}"}
 
     def _handle_client(self, conn, addr):
@@ -251,61 +285,75 @@ class CentralHubServer:
                 break
 
     def _handle_video_connection(self, conn, addr):
-        """Handle TCP video stream from a client and forward it."""
-        client_control_addr = None
-        try:
-            # First, we need to associate this video connection with a control connection
-            # The client should send a HELLO message on the control connection that includes its video port
-            # For now, we'll find the client by matching the IP and hoping the port is right.
-            # A better approach would be a proper handshake.
+        # Find the control client that this video connection belongs to
+        # The IP address of the video connection should match the control connection
+        client_addr = self.state_manager.find_client_by_ip(addr[0])
+
+        if not client_addr:
+            print(f"Error: Could not find matching control client for video connection from {addr}. Dropping.")
+            conn.close()
+            return
             
-            # Simplified: Find client by IP. This assumes one client per IP.
-            for c_addr, info in self.state_manager.get_all_clients().items():
-                if c_addr[0] == addr[0]:
-                    client_control_addr = c_addr
-                    info['video_conn'] = conn
-                    print(f"Associated video connection {addr} with control connection {c_addr}")
-                    break
+        print(f"Associated video connection from {addr} with control client {client_addr}")
+        self.state_manager.add_video_socket(client_addr, conn)
 
-            if not client_control_addr:
-                print(f"Could not find a matching control client for video connection {addr}. Closing.")
-                return
-
+        # Now, continuously receive video data from this socket
+        try:
             while self.running:
-                # Read H.264 packets and forward them
-                # PyAV's h264 container format sends raw packets. We can read in chunks.
-                packet = conn.recv(4096)
-                if not packet:
-                    print(f"Video stream from {addr} ended.")
+                # --- FRAMING PROTOCOL ---
+                # 1. Read the 4-byte frame size header
+                size_bytes = recv_all(conn, 4)
+                if not size_bytes:
+                    print(f"Video client {addr} disconnected (no header).")
                     break
                 
-                # Forward this packet to all connected UI clients
-                # Add logging here to confirm packet reception and forwarding
-                print(f"Received {len(packet)} bytes video packet from {addr}. Forwarding to UI clients.")
-                self._forward_packet_to_ui(packet)
+                frame_size = int.from_bytes(size_bytes, 'big')
 
-        except (ConnectionResetError, BrokenPipeError):
-            print(f"Video connection from {addr} lost.")
+                # Basic validation
+                if frame_size <= 0 or frame_size > 20 * 1024 * 1024: # 20MB limit
+                    print(f"Invalid frame size received from {addr}: {frame_size}")
+                    break
+
+                # 2. Read the full frame data based on the header size
+                frame_data = recv_all(conn, frame_size)
+                if not frame_data:
+                    print(f"Video client {addr} disconnected (incomplete frame).")
+                    break
+                
+                # Create a packet (we don't need to decode it here, just forward)
+                packet = av.Packet(frame_data)
+                
+                # Check if this is the active client
+                active_client_addr = self.state_manager.get_active_client()
+                if client_addr == active_client_addr:
+                    self._forward_packet_to_ui(packet)
+
+        except ConnectionResetError:
+            print(f"Video connection from {addr} was forcibly closed.")
         except Exception as e:
-            print(f"Error handling video from {addr}: {e}")
+            print(f"Error during video streaming from {addr}: {e}")
         finally:
-            if client_control_addr:
-                self.state_manager.get_client_info(client_control_addr).pop('video_conn', None)
+            print(f"Closing video connection from {addr}")
+            self.state_manager.remove_video_socket(client_addr)
             conn.close()
-            print(f"Closed video connection from {addr}")
 
     def _forward_packet_to_ui(self, packet):
         """Forward a raw video packet to all connected UI clients."""
         with self.ui_video_clients_lock:
             disconnected_clients = []
+            # The packet from the native client is already framed (size + data).
+            # The hub's job is to forward this ENTIRE payload to the UI.
+            # `packet` is an av.Packet object. its content is in bytes(packet).
+            data_to_send = bytes(packet)
+            size_header = len(data_to_send).to_bytes(4, 'big')
+            full_message = size_header + data_to_send
+
             for ui_conn in self.ui_video_clients:
                 try:
-                    ui_conn.sendall(packet)
+                    # Send the complete framed message (header + data)
+                    ui_conn.sendall(full_message)
                 except (ConnectionResetError, BrokenPipeError):
                     print("UI video client disconnected.")
-                    disconnected_clients.append(ui_conn)
-                except Exception as e:
-                    print(f"Error sending packet to UI client: {e}")
                     disconnected_clients.append(ui_conn)
             
             # Clean up disconnected clients
@@ -395,6 +443,9 @@ class CentralHubServer:
         self._send_input_event(MessageType.MOUSE_EVENT, {"event_type": "move", "x": x, "y": y})
 
     def _send_input_event(self, event_type, payload):
+        if not self.input_forwarding_enabled:
+            return # Do not send input if forwarding is disabled
+
         active_client_address = self.state_manager.get_active_client()
         if active_client_address and active_client_address in self.state_manager.get_all_clients():
             try:

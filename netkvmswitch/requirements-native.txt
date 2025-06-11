@@ -1,0 +1,15 @@
+# Native backend dependencies
+pybind11>=2.6.0
+numpy>=1.19.0
+setuptools>=50.0.0
+wheel>=0.36.0
+
+# Build tools (Windows)
+# Note: On Windows, you may also need:
+# - Visual Studio 2019 or later (with C++ support)
+# - CMake (if using CMake build)
+# - FFmpeg development libraries
+
+# For development
+pytest>=6.0.0
+pytest-cov>=2.10.0 

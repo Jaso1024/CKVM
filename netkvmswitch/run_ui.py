@@ -2,30 +2,39 @@
 """
 NetKVMSwitch UI Runner
 
-This script starts the Streamlit web UI for the NetKVMSwitch application.
+This script starts the FastAPI web UI and the Central Hub server.
 """
 
 import sys
 import os
-import streamlit.web.cli as stcli
+import multiprocessing
+import uvicorn
+import time
 
-# This script is now the single entry point for the application.
+from src.central_hub.hub_runner import run_hub_process
 
 def main():
     # Add the 'src' directory to the Python path
-    # This allows for absolute imports from the project root (e.g., from common import config)
     src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), 'src'))
     if src_path not in sys.path:
         sys.path.insert(0, src_path)
 
-    # The path to the Streamlit app script
-    app_path = os.path.join(src_path, 'ui', 'app.py')
+    # Start the Central Hub server in a separate process
+    hub_process = multiprocessing.Process(target=run_hub_process, daemon=True)
+    hub_process.start()
+    print("[UI RUNNER] Hub process started.")
     
-    # Use Streamlit's own command line interface to run the app
-    # This is a more robust way to launch Streamlit programmatically
-    sys.argv = ["streamlit", "run", app_path]
-    
-    stcli.main()
+    # Give the hub a moment to start up
+    time.sleep(2)
+
+    # Start the FastAPI web UI using uvicorn
+    print("[UI RUNNER] Starting FastAPI web UI...")
+    # Note: We need to specify the app as a string 'module:app_object'
+    # and set the working directory to 'src' so it can find the modules.
+    uvicorn.run("web_ui.main:app", host="0.0.0.0", port=8000, reload=True, app_dir=src_path)
 
 if __name__ == "__main__":
-    main() 
+    # This is necessary for multiprocessing on Windows
+    if sys.platform == 'win32':
+        multiprocessing.freeze_support()
+    main()
