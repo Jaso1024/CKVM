@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from common.protocol import create_message, parse_message, MessageType
 from common.config import config
+from common.utils import resource_path
 from pynput import mouse, keyboard
 
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -102,8 +103,8 @@ def video_pipeline_process(running_flag, encoded_packet_queue, shm_name, frame_s
     existing_shm.close()
 
 class SourceAgentClient:
-    def __init__(self, server_host=None, server_port=None, video_port=None, client_name=None):
-        self.server_host = server_host or config.client.server_host
+    def __init__(self, server_host=None, server_port=None, video_port=None, client_name=None, network_accessible=False):
+        self.server_host = "0.0.0.0" if network_accessible else (server_host or config.client.server_host)
         self.server_port = server_port or config.client.server_port
         self.video_port = video_port or config.client.video_port
         self.client_name = client_name or config.client.client_name
@@ -146,16 +147,15 @@ class SourceAgentClient:
     def _connect_to_server(self, server_ip):
         try:
             context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-            certs_dir = config.get_certs_dir()
             context.load_cert_chain(
-                certfile=os.path.join(certs_dir, config.security.client_cert), 
-                keyfile=os.path.join(certs_dir, config.security.client_key)
+                certfile=resource_path(os.path.join('certs', config.security.client_cert)), 
+                keyfile=resource_path(os.path.join('certs', config.security.client_key))
             )
             if server_ip in ['127.0.0.1', 'localhost']:
                 context.check_hostname = False
                 context.verify_mode = ssl.CERT_NONE
             else:
-                context.load_verify_locations(os.path.join(certs_dir, config.security.ca_cert))
+                context.load_verify_locations(resource_path(os.path.join('certs', config.security.ca_cert)))
             
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.control_socket = context.wrap_socket(sock, server_hostname=server_ip)
@@ -178,12 +178,10 @@ class SourceAgentClient:
             return False
 
     def _start_streaming(self):
-        # Get native screen resolution for the primary monitor
         with mss() as sct:
             monitor = sct.monitors[1]
             width, height = monitor['width'], monitor['height']
 
-        # Ensure dimensions are divisible by 2 for the encoder
         width = width if width % 2 == 0 else width - 1
         height = height if height % 2 == 0 else height - 1
         
@@ -257,7 +255,7 @@ class SourceAgentClient:
         elif msg_type == MessageType.RESTART:
             logging.warning("Restart command received from hub.")
             self.stop()
-            time.sleep(1) # Give sockets time to close
+            time.sleep(1)
             self.start()
 
     def _inject_key_event(self, payload):
@@ -280,7 +278,6 @@ class SourceAgentClient:
         elif event_type == "move": self.mouse_controller.position = (payload["x"], payload["y"])
 
 def main():
-    # This is required for multiprocessing to work correctly on Windows
     if sys.platform == 'win32':
         import multiprocessing
         multiprocessing.freeze_support()

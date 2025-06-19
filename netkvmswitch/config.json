@@ -1,7 +1,7 @@
 {
   "server": {
     "host": "0.0.0.0",
-    "port": 12345,
+    "port": 7001,
     "video_port": 12346,
     "ui_video_port": 12347,
     "ui_control_port": 12348,
@@ -9,7 +9,7 @@
   },
   "client": {
     "server_host": "127.0.0.1",
-    "server_port": 12345,
+    "server_port": 7002,
     "video_port": 12346,
     "client_name": "SourceAgent",
     "video_quality": 60,
@@ -27,7 +27,7 @@
   },
   "ui": {
     "host": "0.0.0.0",
-    "port": 8501,
+    "port": 8080,
     "server_host": "127.0.0.1",
     "server_port": 12345,
     "ui_control_port": 12348,
@@ -36,4 +36,4 @@
     "frame_update_rate": 0.04
   },
   "debug": false
-} 
+}

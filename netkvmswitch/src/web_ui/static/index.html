@@ -14,6 +14,17 @@
                 <!-- Client items will be inserted here by JavaScript -->
             </ul>
             <div class="controls">
+                <h2>Hub Settings</h2>
+                <div class="hub-control">
+                    <label for="hub-ip">Hub IP:</label>
+                    <input type="text" id="hub-ip" value="127.0.0.1">
+                </div>
+                <div class="hub-control">
+                    <label>
+                        <input type="checkbox" id="network-accessible">
+                        Allow Network Access
+                    </label>
+                </div>
                 <h2>Controls</h2>
                 <button id="start-agent-btn">Start Source Agent</button>
                 <button id="stop-agent-btn" style="display:none;">Stop Source Agent</button>

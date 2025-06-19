@@ -15,6 +15,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from common.protocol import create_message, parse_message
 from common.config import config
+from common.utils import resource_path
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - WEB_UI - %(message)s')
@@ -107,10 +108,19 @@ async def start_agent():
     if agent_process and agent_process.poll() is None:
         return {"success": False, "message": "Agent is already running."}
     
-    src_dir = os.path.join(os.path.dirname(__file__), '..')
+    if getattr(sys, 'frozen', False):
+        # The 'executable' is the bundled exe itself.
+        # We need to run it with a special flag to act as the agent.
+        agent_cmd = [sys.executable, "--run-agent"]
+        cwd = sys._MEIPASS
+    else:
+        # In development, run the agent module using the current python interpreter.
+        agent_cmd = [sys.executable, "-m", "src.source_agent.agent_runner"]
+        cwd = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+
     agent_process = subprocess.Popen(
-        [sys.executable, "-m", "source_agent.agent_runner"],
-        cwd=src_dir,
+        agent_cmd,
+        cwd=cwd,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
     )
     return {"success": True, "message": "Agent started."}
@@ -148,6 +158,12 @@ async def shutdown_hub():
     # which will then allow the run_ui.py script to terminate the hub process.
     os.kill(os.getpid(), signal.SIGINT)
     return {"success": True, "message": "Shutdown signal sent."}
+
+@app.post("/api/hub/set_network_accessible")
+async def set_network_accessible(payload: dict):
+    enabled = payload.get("enabled", False)
+    response = hub_connector.send_command("set_network_accessible", {"enabled": enabled})
+    return response or {"success": False, "message": "Failed to set network accessible"}
 
 # --- WebSocket Endpoint ---
 @app.websocket("/ws/video")
@@ -205,11 +221,12 @@ async def startup_event():
     asyncio.create_task(forward_video_stream())
 
 # --- Static File Serving ---
-app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
+static_path = resource_path("web_ui/static")
+app.mount("/static", StaticFiles(directory=static_path), name="static")
 
 @app.get("/")
 async def read_index():
-    return FileResponse(os.path.join(os.path.dirname(__file__), 'static/index.html'))
+    return FileResponse(os.path.join(static_path, 'index.html'))
 
 if __name__ == "__main__":
     import uvicorn

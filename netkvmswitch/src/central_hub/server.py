@@ -15,13 +15,11 @@ import serial.tools.list_ports
 import base64
 import av
 
-# Add the 'src' directory to the Python path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from common.protocol import MessageType, create_message, parse_message
-from common.serial_protocol import send_framed, receive_framed
-from common.config import config
+from ..common.protocol import MessageType, create_message, parse_message
+from ..common.serial_protocol import send_framed, receive_framed
+from ..common.config import config
 from .state_manager import StateManager
+from ..common.utils import resource_path
 
 def recv_all(sock, n):
     """Helper function to receive n bytes from a socket."""
@@ -34,8 +32,8 @@ def recv_all(sock, n):
     return data
 
 class CentralHubServer:
-    def __init__(self, host=None, port=None, video_port=None):
-        self.host = host or config.server.host
+    def __init__(self, host=None, port=None, video_port=None, network_accessible=False):
+        self.host = "0.0.0.0" if network_accessible else (host or config.server.host)
         self.port = port or config.server.port
         self.video_port = video_port or config.server.video_port
         self.ui_control_port = config.server.ui_control_port
@@ -54,17 +52,13 @@ class CentralHubServer:
         self.mouse_listener = None
 
     def start(self):
-        import os
-
-        certs_dir = config.get_certs_dir()
-
         if config.security.use_tls:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(
-                os.path.join(certs_dir, config.security.server_cert), 
-                os.path.join(certs_dir, config.security.server_key)
+                certfile=resource_path(os.path.join('certs', config.security.server_cert)),
+                keyfile=resource_path(os.path.join('certs', config.security.server_key))
             )
-            context.load_verify_locations(os.path.join(certs_dir, config.security.ca_cert))
+            context.load_verify_locations(resource_path(os.path.join('certs', config.security.ca_cert)))
             
             if self.host in ['127.0.0.1', 'localhost']:
                 context.verify_mode = ssl.CERT_NONE
@@ -562,7 +556,7 @@ class CentralHubServer:
             self.server_socket.close()
         if self.video_socket:
             self.video_socket.close()
-        if self.ui_video_socket:
+        if hasattr(self, 'ui_video_socket') and self.ui_video_socket:
             self.ui_video_socket.close()
         if self.ui_control_socket:
             self.ui_control_socket.close()

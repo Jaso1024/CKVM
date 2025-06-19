@@ -9,6 +9,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const refreshYesBtn = document.getElementById('refresh-yes');
     const refreshNoBtn = document.getElementById('refresh-no');
     const shutdownHubBtn = document.getElementById('shutdown-hub-btn');
+    const hubIpInput = document.getElementById('hub-ip');
+    const networkAccessibleCheckbox = document.getElementById('network-accessible');
 
     let players = {};
     let activeIOClient = null;
@@ -231,7 +233,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function startAgent() {
         try {
-            await fetch('/api/agent/start', { method: 'POST' });
+            await fetch('/api/agent/start', { 
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ hub_ip: hubIpInput.value })
+            });
             updateAgentButtons(true);
         } catch (error) {
             console.error('Error starting agent:', error);
@@ -274,6 +280,18 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     }
 
+    async function setNetworkAccessible(enabled) {
+        try {
+            await fetch('/api/hub/set_network_accessible', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: enabled }),
+            });
+        } catch (error) {
+            console.error('Error setting network accessible:', error);
+        }
+    }
+
     document.addEventListener('mousedown', handleMouseClick);
     document.addEventListener('mouseup', handleMouseClick);
     document.addEventListener('wheel', handleMouseScroll, { passive: false });
@@ -293,6 +311,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 console.error('Error shutting down hub:', error);
             }
         }
+    });
+    networkAccessibleCheckbox.addEventListener('change', (event) => {
+        setNetworkAccessible(event.target.checked);
     });
 
     connectWebSocket();
